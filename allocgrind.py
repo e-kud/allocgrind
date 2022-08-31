@@ -1,9 +1,9 @@
 #!/usr/bin/python3
 
-import string
 import re
 import sys
 import collections
+from dataclasses import dataclass, field
 
 mmapmax = {}
 mmap = {}
@@ -12,20 +12,20 @@ brkmax = {}
 interrupted = {}
 stacks = collections.defaultdict(lambda: 0)
 
+@dataclass
 class Event:
-    def __init__(self, pid, timestamp, syscall, args, ret):
-        self.pid = pid
-        self.timestamp = timestamp
-        self.syscall = syscall
-        self.args = args
-        self.ret = ret
-        self.bt = []
+    pid: int
+    timestamp: str
+    syscall: str
+    args: str
+    ret: str
+    stack: list[str] = field(default_factory=list)
 
-    def append_trace(self, trace_element):
-        self.bt.append(trace_element.strip())
+    def append_stack_element(self, stack_element):
+        self.stack.append(stack_element.strip())
 
     def get_stack(self):
-        return f'{self.pid};{";".join(self.bt)}'
+        return f'{self.pid};{";".join(self.stack)}'
 
 def handle_event(event):
     if not event:
@@ -37,7 +37,7 @@ def handle_event(event):
         addr = int(event.ret, 16)
         brkmin[pid] = min(brkmin.get(pid, addr + 1), addr)
         brkmax[pid] = max(brkmax.get(pid, addr - 1), addr)
-    # 7277 01:27:22.130417 mmap(0x7f8f22506000, 163840, PROT_READ, MAP_PRIVATE|MAP_FIXED|MAP_DENYWRITE, 3, 0x6d000) = 0x7f8f22506000
+    # 7277 01:27:22.130417 mmap(0x7f8f22506000, 163840, PROT_READ, ..., 3, 0x6d000) = 0x7f8f22506000
     elif event.syscall == 'mmap':
         farg = event.args.index(',') + 1
         sarg = event.args.index(',', farg)
@@ -48,7 +48,7 @@ def handle_event(event):
     elif event.syscall == 'munmap':
         farg = event.args.index(',') + 1
         mmap[pid] = mmap.get(pid, 0) - int(event.args[farg:])
-    # 2111 01:51:36.604570 mremap(0x7fa87b9ad000, 4096, 4096, MREMAP_MAYMOVE|MREMAP_FIXED, 0x7fa87b9e7000) = 0x7fa87b9e7000
+    # 2111 01:51:36.604570 mremap(0x7fa87b9ad000, 4096, 4096, ..., 0x7fa87b9e7000) = 0x7fa87b9e7000
     elif event.syscall == 'mremap':
         farg = event.args.index(',')
         sarg = event.args.index(',', farg + 1)
@@ -78,48 +78,57 @@ def handle_event(event):
 #         - resumed>)
 # group 6 - (arg, arg, arg)
 # group 7 - hex or decimal number
-generic_pattern = re.compile(r'([0-9]+) ([0-9:\.]+) (<\.\.\. )*(brk|sbrk|mmap|munmap|mremap)(\((.*)\)\s*=\s*([0-9a-fx]+)|.*unfinished.*|.*resumed.*)')
+generic_pattern = re.compile(r'([0-9]+) '
+                             r'([0-9:\.]+) '
+                             r'(<\.\.\. )*(brk|sbrk|mmap|munmap|mremap)'
+                             r'(\((.*)\)\s*=\s*([0-9a-fx]+)|.*unfinished.*|.*resumed.*)')
 
-event = None
-for line in sys.stdin:
-    if line.startswith(' >'):
-        if not event:
-            continue
-        print(line)
-        event.append_trace(line[len(' > '):]);
-    else:
-        handle_event(event)
-        event = None
-        print(line)
-        syscall = generic_pattern.match(line)
-        if not syscall:
-            assert '+++' in line or '---' in line
-            continue
-        pid = int(syscall.group(1))
-        if 'unfinished' in syscall.group(5):
-            interrupted[pid] = line
-            continue
-        elif 'resumed' in syscall.group(5):
-            line = interrupted[pid][:-len(' <unfinished ...>')] + line[line.index('>') + 1:]
-            print('Concatenated call:', line)
+def main():
+    event = None
+    for line in sys.stdin:
+        if line.startswith(' >'):
+            if not event:
+                continue
+            print(line)
+            event.append_stack_element(line[len(' > '):])
+        else:
+            handle_event(event)
+            event = None
+            print(line)
             syscall = generic_pattern.match(line)
-            assert syscall
+            if not syscall:
+                assert '+++' in line or '---' in line
+                continue
+            pid = int(syscall.group(1))
+            if 'unfinished' in syscall.group(5):
+                interrupted[pid] = line
+                continue
 
-        event = Event(syscall.group(1), syscall.group(2), syscall.group(4), syscall.group(6), syscall.group(7))
+            if 'resumed' in syscall.group(5):
+                line = interrupted[pid][:-len(' <unfinished ...>')] + line[line.index('>') + 1:]
+                print('Concatenated call:', line)
+                syscall = generic_pattern.match(line)
+                assert syscall
 
-ovrallmmap = 0
-for pid, val in mmapmax.items():
-    if val > ovrallmmap:
-        ovrallmmap = val
+            event = Event(pid, syscall.group(2), syscall.group(4), syscall.group(6),
+                          syscall.group(7))
 
-ovrallbrk = 0
-for pid, val in brkmax.items():
-    use = val - brkmin[pid]
-    if use > ovrallbrk:
-        ovrallbrk = use
+    ovrallmmap = 0
+    for pid, val in mmapmax.items():
+        if val > ovrallmmap:
+            ovrallmmap = val
 
-print("total: %u kB" % ((ovrallmmap + ovrallbrk)/1024))
+    ovrallbrk = 0
+    for pid, val in brkmax.items():
+        use = val - brkmin[pid]
+        if use > ovrallbrk:
+            ovrallbrk = use
 
-with open('out.stacks', 'w') as fstacks:
-    for stack, mem in stacks.items():
-        fstacks.write(f'{stack} {mem}\n')
+    print(f'total: {(ovrallmmap + ovrallbrk)/1024} kB')
+
+    with open('out.stacks', 'w', encoding='UTF-8') as fstacks:
+        for stack, mem in stacks.items():
+            fstacks.write(f'{stack} {mem}\n')
+
+if __name__ == "__main__":
+    main()
