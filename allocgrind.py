@@ -9,6 +9,7 @@ mmapmax = collections.defaultdict(lambda: 0)
 mmap = collections.defaultdict(lambda: 0)
 brkmin = collections.defaultdict(lambda: 0xffffffffffffffff)
 brkmax = collections.defaultdict(lambda: 0)
+brklast = {}
 interrupted = {}
 stacks = collections.defaultdict(lambda: 0)
 
@@ -35,8 +36,11 @@ def handle_event(event):
     # 26277 01:11:15.512823 brk(0x55a08e186000) = 0x55a08e186000
     if event.syscall == 'brk':
         addr = int(event.ret, 16)
+        last = brklast.get(pid, addr)
+        new = addr - last
         brkmin[pid] = min(brkmin[pid], addr)
         brkmax[pid] = max(brkmax[pid], addr)
+        brklast[pid] = addr
     # 7277 01:27:22.130417 mmap(0x7f8f22506000, 163840, PROT_READ, ..., 3, 0x6d000) = 0x7f8f22506000
     elif event.syscall == 'mmap':
         farg = event.args.index(',') + 1
@@ -55,7 +59,7 @@ def handle_event(event):
         targ = event.args.index(',', sarg + 1)
         old_size = int(event.args[farg + 1:sarg])
         new_size = int(event.args[sarg + 1:targ])
-        new = max(0, new_size - old_size)
+        new = new_size - old_size
         mmap[pid] = mmap[pid] - old_size + new_size
         mmapmax[pid] = max(mmapmax[pid], mmap[pid])
     else:
