@@ -5,10 +5,10 @@ import sys
 import collections
 from dataclasses import dataclass, field
 
-mmapmax = {}
-mmap = {}
-brkmin = {}
-brkmax = {}
+mmapmax = collections.defaultdict(lambda: 0)
+mmap = collections.defaultdict(lambda: 0)
+brkmin = collections.defaultdict(lambda: 0xffffffffffffffff)
+brkmax = collections.defaultdict(lambda: 0)
 interrupted = {}
 stacks = collections.defaultdict(lambda: 0)
 
@@ -35,19 +35,19 @@ def handle_event(event):
     # 26277 01:11:15.512823 brk(0x55a08e186000) = 0x55a08e186000
     if event.syscall == 'brk':
         addr = int(event.ret, 16)
-        brkmin[pid] = min(brkmin.get(pid, addr + 1), addr)
-        brkmax[pid] = max(brkmax.get(pid, addr - 1), addr)
+        brkmin[pid] = min(brkmin[pid], addr)
+        brkmax[pid] = max(brkmax[pid], addr)
     # 7277 01:27:22.130417 mmap(0x7f8f22506000, 163840, PROT_READ, ..., 3, 0x6d000) = 0x7f8f22506000
     elif event.syscall == 'mmap':
         farg = event.args.index(',') + 1
         sarg = event.args.index(',', farg)
         new = int(event.args[farg:sarg])
-        mmap[pid] = mmap.get(pid, 0) + new
-        mmapmax[pid] = max(mmapmax.get(pid, 0), mmap[pid])
+        mmap[pid] += new
+        mmapmax[pid] = max(mmapmax[pid], mmap[pid])
     # 9125 01:36:43.907874 munmap(0x7fee2f6cd000, 66971) = 0
     elif event.syscall == 'munmap':
         farg = event.args.index(',') + 1
-        mmap[pid] = mmap.get(pid, 0) - int(event.args[farg:])
+        mmap[pid] -= int(event.args[farg:])
     # 2111 01:51:36.604570 mremap(0x7fa87b9ad000, 4096, 4096, ..., 0x7fa87b9e7000) = 0x7fa87b9e7000
     elif event.syscall == 'mremap':
         farg = event.args.index(',')
@@ -56,8 +56,8 @@ def handle_event(event):
         old_size = int(event.args[farg + 1:sarg])
         new_size = int(event.args[sarg + 1:targ])
         new = max(0, new_size - old_size)
-        mmap[pid] = mmap.get(pid, 0) - old_size + new_size
-        mmapmax[pid] = max(mmapmax.get(pid, 0), mmap[pid])
+        mmap[pid] = mmap[pid] - old_size + new_size
+        mmapmax[pid] = max(mmapmax[pid], mmap[pid])
     else:
         print(event.__dict__)
         assert False
